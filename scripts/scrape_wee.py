@@ -16,10 +16,18 @@ from difflib import SequenceMatcher
 
 # Try to import email configuration
 try:
-    from config.email_config import (
-        RECIPIENTS, EMAIL_SERVER_CONFIG, GLOBAL_ALERT_SETTINGS, 
-        EMAIL_TEMPLATES, can_send_alert, record_alert_sent
-    )
+    # Try to import from scripts directory first
+    try:
+        from email_config import (
+            RECIPIENTS, EMAIL_SERVER_CONFIG, GLOBAL_ALERT_SETTINGS, 
+            EMAIL_TEMPLATES, can_send_alert, record_alert_sent
+        )
+    except ImportError:
+        # Fallback to config directory
+        from config.email_config import (
+            RECIPIENTS, EMAIL_SERVER_CONFIG, GLOBAL_ALERT_SETTINGS, 
+            EMAIL_TEMPLATES, can_send_alert, record_alert_sent
+        )
     EMAIL_ENABLED = GLOBAL_ALERT_SETTINGS.get('enable_alerts', False)
 except ImportError:
     RECIPIENTS = []
@@ -36,12 +44,101 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 📌 Products to track for price drops
-tracked_products_str = os.getenv('TRACKED_PRODUCTS', '["Maggi Masala Instant Noodles 9.8 oz", "Lee Kum Kee Supreme Soy Sauce 500 ml"]')
+# 📌 Products to track for price drops - Comprehensive Indian Grocery List
+tracked_products_str = os.getenv('TRACKED_PRODUCTS', '[]')
 try:
     TRACKED_PRODUCTS = json.loads(tracked_products_str)
 except json.JSONDecodeError:
-    TRACKED_PRODUCTS = ["Maggi Masala Instant Noodles 9.8 oz", "Lee Kum Kee Supreme Soy Sauce 500 ml"]
+    # Default comprehensive list of Indian grocery items to track
+    TRACKED_PRODUCTS = [
+        # Fresh Vegetables
+        "Indian Eggplant 2 lb",
+        "Indian Bitter Melon 2 lb",
+        "Indian okra 0.9-1.1 lb",
+        "Red onions 2 lb bag",
+        "Roma tomatoes 2 lb bag",
+        "Fresh ginger 0.95-1.05 lb",
+        "Green onion 1 bunch",
+        "Cauliflower 1 head",
+        "Spinach 1 bunch",
+        "Sleeved garlic pack 5 ct",
+        "Green cabbage 1 head",
+        "Yellow onion 3 lb bag",
+        "Persian cucumbers 0.9-1.1 lb",
+        "Idaho russet potatoes 5 lb",
+        "Green bell pepper",
+        "Opo squash 1 pc",
+        "Green beans 0.9-1.1 lb",
+        "Carrots 2 lb bag",
+        
+        # Fresh Herbs
+        "Cilantro 1 bunch",
+        "Curry leaves 0.25 oz",
+        "Mint 1 bunch",
+        
+        # Fresh Fruits
+        "Bananas 2.6-3 lb",
+        
+        # Fresh Chilies
+        "Mini spicy green chilies 226 g bag",
+        
+        # Instant Noodles
+        "Maggi Masala instant noodles 9.8 oz",
+        
+        # Frozen Items
+        "Deep Paneer Paratha Frozen 4 pcs 13 oz",
+        "Deep Bhagwati's Methi Thepla 9 oz",
+        "Deep ClayOven Tandoori Naan Family Pack 42.4 oz",
+        "Deep Family Pack Homestyle Paratha 20 pcs 46 oz",
+        "Franco uncooked phulka 18 pcs 1.31 lb",
+        
+        # Rice Products
+        "Laxmi Poha Flattened Rice Thick 4 lb",
+        "Shastha Dosa Batter 32 oz",
+        "India Gate Basmati Rice",
+        "Laxmi Idli Rice 20 lb",
+        "Regal Sona Masoori Rice 20 lb",
+        "Laxmi Ponni Boiled Rice 20 lb",
+        
+        # Flour Products
+        "Aashirvaad Whole Wheat Atta Flour 20 lb",
+        "Laxmi Besan gram flour 2 lb",
+        
+        # Pulses/Lentils
+        "Laxmi Toor Dal Split Pigeon Peas 4 lb",
+        "Laxmi Moong Dal Skinned mung beans 4 lb",
+        "Laxmi Yellow Split Peas 4 lb",
+        "Laxmi Urad Dal Split 4 lb",
+        "Laxmi Chana Dal 4 lb",
+        "Laxmi Kabuli Chana chickpeas 4 lb",
+        "Laxmi Kala Chana black chickpeas 4 lb",
+        "Laxmi Urad Gota black whole lentil 4 lb",
+        "Laxmi Urad Dal skinned 4 lb",
+        "Laxmi Sabudana tapioca 4 lb",
+        
+        # Dairy Products
+        "Vadilal Paneer Block",
+        "Nanak Plain Paneer 400 g",
+        "Pavel's whole-milk yogurt 32 oz",
+        "Amul Ghee clarified butter",
+        
+        # Snacks
+        "Garvi Gujarat Gujarati Chakri 10 oz",
+        "Kurkure Masala Munch chips",
+        "Kurkure Chilli Chatka chips",
+        "Lay's Magic Masala chips 1.82 oz",
+        "Laxmi Puffed Rice 14 oz",
+        
+        # Condiments/Sauces
+        "Ching's Schezwan chutney",
+        "Lee Kum Kee Supreme Soy Sauce 500 ml",
+        
+        # Spices
+        "Aara Cumin Seeds",
+        
+        # Fish
+        "TSF Barramundi Whole Cleaned 500-550 g"
+    ]
 
 # Debug: Print what products we're tracking (only in debug mode)
 if os.getenv('DEBUG_MODE', 'false').lower() == 'true':
@@ -83,18 +180,84 @@ def is_tracked_product(product_name):
             return True
         
         # Check for specific brand/product keywords
-        if 'maggi' in tracked.lower() and 'maggi' in product_name.lower():
-            return True
-        if 'lee kum' in tracked.lower() and 'lee kum' in product_name.lower():
-            return True
-        if 'soy sauce' in tracked.lower() and 'soy' in product_name.lower():
-            return True
-        if 'noodles' in tracked.lower() and 'noodles' in product_name.lower():
-            return True
-        if 'barramundi' in tracked.lower() and 'barramundi' in product_name.lower():
-            return True
-        if 'tsf' in tracked.lower() and 'tsf' in product_name.lower():
-            return True
+        brand_keywords = [
+            ('maggi', 'maggi'),
+            ('lee kum', 'lee kum'),
+            ('soy sauce', 'soy'),
+            ('noodles', 'noodles'),
+            ('barramundi', 'barramundi'),
+            ('tsf', 'tsf'),
+            ('laxmi', 'laxmi'),
+            ('deep', 'deep'),
+            ('aashirvaad', 'aashirvaad'),
+            ('india gate', 'india gate'),
+            ('regal', 'regal'),
+            ('pavel', 'pavel'),
+            ('amul', 'amul'),
+            ('vadilal', 'vadilal'),
+            ('nanak', 'nanak'),
+            ('garvi gujarat', 'garvi'),
+            ('kurkure', 'kurkure'),
+            ('lay', 'lay'),
+            ('ching', 'ching'),
+            ('aara', 'aara'),
+            ('shastha', 'shastha'),
+            ('franco', 'franco')
+        ]
+        
+        for tracked_keyword, product_keyword in brand_keywords:
+            if tracked_keyword in tracked.lower() and product_keyword in product_name.lower():
+                return True
+        
+        # Check for specific product type keywords
+        product_type_keywords = [
+            ('paneer', 'paneer'),
+            ('ghee', 'ghee'),
+            ('yogurt', 'yogurt'),
+            ('rice', 'rice'),
+            ('flour', 'flour'),
+            ('atta', 'atta'),
+            ('besan', 'besan'),
+            ('dal', 'dal'),
+            ('chana', 'chana'),
+            ('urad', 'urad'),
+            ('moong', 'moong'),
+            ('toor', 'toor'),
+            ('sabudana', 'sabudana'),
+            ('poha', 'poha'),
+            ('paratha', 'paratha'),
+            ('naan', 'naan'),
+            ('thepla', 'thepla'),
+            ('phulka', 'phulka'),
+            ('dosa', 'dosa'),
+            ('idli', 'idli'),
+            ('chakri', 'chakri'),
+            ('chips', 'chips'),
+            ('cumin', 'cumin'),
+            ('eggplant', 'eggplant'),
+            ('okra', 'okra'),
+            ('onion', 'onion'),
+            ('tomato', 'tomato'),
+            ('ginger', 'ginger'),
+            ('garlic', 'garlic'),
+            ('cabbage', 'cabbage'),
+            ('cucumber', 'cucumber'),
+            ('potato', 'potato'),
+            ('bell pepper', 'pepper'),
+            ('squash', 'squash'),
+            ('beans', 'beans'),
+            ('carrot', 'carrot'),
+            ('cilantro', 'cilantro'),
+            ('curry leaves', 'curry'),
+            ('mint', 'mint'),
+            ('banana', 'banana'),
+            ('chilies', 'chili'),
+            ('chilli', 'chili')
+        ]
+        
+        for tracked_keyword, product_keyword in product_type_keywords:
+            if tracked_keyword in tracked.lower() and product_keyword in product_name.lower():
+                return True
     
     return False
 

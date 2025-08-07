@@ -1,0 +1,354 @@
+#!/bin/bash
+
+# 🚀 Weee! Price Tracker - Complete System Runner
+# This script runs the scraper, analyzes data, and sends results via email
+
+set -e  # Exit on any error
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}"
+}
+
+print_info() {
+    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $1${NC}"
+}
+
+# Function to check if virtual environment is activated
+check_venv() {
+    if [[ "$VIRTUAL_ENV" == "" ]]; then
+        print_warning "Virtual environment not detected. Attempting to activate..."
+        if [ -d "venv" ]; then
+            source venv/bin/activate
+            print_status "Virtual environment activated"
+        else
+            print_error "Virtual environment not found. Please run: python3 -m venv venv && source venv/bin/activate"
+            exit 1
+        fi
+    else
+        print_status "Virtual environment is active: $VIRTUAL_ENV"
+    fi
+}
+
+# Function to check dependencies
+check_dependencies() {
+    print_info "Checking dependencies..."
+    
+    # Check if required packages are installed
+    python3 -c "import requests, beautifulsoup4, pandas, dotenv" 2>/dev/null || {
+        print_warning "Some dependencies missing. Installing..."
+        pip install -r requirements.txt
+    }
+    
+    print_status "Dependencies check completed"
+}
+
+# Function to create data directories
+setup_directories() {
+    print_info "Setting up data directories..."
+    
+    mkdir -p data/processed
+    mkdir -p data/raw
+    mkdir -p logs
+    
+    print_status "Directories created"
+}
+
+# Function to run the scraper
+run_scraper() {
+    print_info "Running Weee! price scraper..."
+    
+    # Run the scraper and capture output
+    SCRAPER_OUTPUT=$(python3 scripts/scrape_wee.py 2>&1)
+    SCRAPER_EXIT_CODE=$?
+    
+    if [ $SCRAPER_EXIT_CODE -eq 0 ]; then
+        print_status "Scraper completed successfully"
+        echo "$SCRAPER_OUTPUT" >> logs/scraper_$(date +%Y%m%d).log
+    else
+        print_error "Scraper failed with exit code $SCRAPER_EXIT_CODE"
+        echo "$SCRAPER_OUTPUT" >> logs/scraper_error_$(date +%Y%m%d).log
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to analyze data
+run_analysis() {
+    print_info "Running data analysis..."
+    
+    # Run the analysis script
+    ANALYSIS_OUTPUT=$(python3 scripts/analyze_data.py 2>&1)
+    ANALYSIS_EXIT_CODE=$?
+    
+    if [ $ANALYSIS_EXIT_CODE -eq 0 ]; then
+        print_status "Analysis completed successfully"
+        echo "$ANALYSIS_OUTPUT" >> logs/analysis_$(date +%Y%m%d).log
+    else
+        print_warning "Analysis script not found or failed"
+        echo "$ANALYSIS_OUTPUT" >> logs/analysis_error_$(date +%Y%m%d).log
+    fi
+}
+
+# Function to generate email report
+generate_email_report() {
+    print_info "Generating email report..."
+    
+    # Create email content
+    EMAIL_CONTENT="
+🚀 Weee! Price Tracker - Daily Report
+=====================================
+
+📅 Date: $(date '+%Y-%m-%d %H:%M:%S')
+
+📊 SCRAPER RESULTS:
+$(python3 scripts/scrape_wee.py 2>&1 | grep -E "(✅|❌|📊|💰)" || echo "No results found")
+
+📈 DATA SUMMARY:
+$(if [ -f "data/processed/wee_prices.csv" ]; then
+    echo "CSV file size: $(ls -lh data/processed/wee_prices.csv | awk '{print $5}')"
+    echo "Total records: $(wc -l < data/processed/wee_prices.csv)"
+    echo "Latest products found:"
+    tail -5 data/processed/wee_prices.csv | while IFS=',' read -r name price unit brand category timestamp source; do
+        echo "  • $name - $price"
+    done
+else
+    echo "No CSV data file found"
+fi)
+
+📋 TRACKED PRODUCTS:
+$(python3 -c "
+import json
+import os
+from dotenv import load_dotenv
+load_dotenv()
+try:
+    products = json.loads(os.getenv('TRACKED_PRODUCTS', '[]'))
+    for i, product in enumerate(products, 1):
+        print(f'  {i}. {product}')
+except:
+    print('  No tracked products configured')
+" 2>/dev/null || echo "  Error loading tracked products")
+
+🔧 SYSTEM STATUS:
+- Virtual Environment: $(if [[ "$VIRTUAL_ENV" != "" ]]; then echo "Active"; else echo "Not Active"; fi)
+- Data Directory: $(if [ -d "data/processed" ]; then echo "Exists"; else echo "Missing"; fi)
+- Logs Directory: $(if [ -d "logs" ]; then echo "Exists"; else echo "Missing"; fi)
+
+📧 EMAIL CONFIGURATION:
+$(python3 -c "
+try:
+    from scripts.email_config import RECIPIENTS, EMAIL_SERVER_CONFIG
+    print(f'  Recipients: {len(RECIPIENTS)}')
+    print(f'  Server: {EMAIL_SERVER_CONFIG.get(\"smtp_server\", \"Not configured\")}')
+    print(f'  Sender: {EMAIL_SERVER_CONFIG.get(\"sender_email\", \"Not configured\")}')
+except:
+    print('  Email configuration not found')
+" 2>/dev/null || echo "  Email configuration error")
+
+---
+Generated by Weee! Price Tracker
+$(date '+%Y-%m-%d %H:%M:%S')
+"
+
+    # Save email content to file
+    echo "$EMAIL_CONTENT" > "reports/daily_report_$(date +%Y%m%d_%H%M%S).txt"
+    
+    print_status "Email report generated"
+    echo "$EMAIL_CONTENT"
+}
+
+# Function to send email
+send_email_report() {
+    print_info "Sending email report..."
+    
+    # Check if email configuration exists
+    if ! python3 -c "from scripts.email_config import RECIPIENTS, EMAIL_SERVER_CONFIG" 2>/dev/null; then
+        print_warning "Email configuration not found. Skipping email send."
+        return 1
+    fi
+    
+    # Check if reports directory exists
+    if [ ! -d "reports" ]; then
+        print_error "Reports directory not found"
+        return 1
+    fi
+    
+    # Find the latest report file
+    LATEST_REPORT=$(ls -t reports/daily_report_*.txt 2>/dev/null | head -1)
+    if [ -z "$LATEST_REPORT" ]; then
+        print_error "No report files found in reports directory"
+        return 1
+    fi
+    
+    print_info "Found report: $LATEST_REPORT"
+    
+    # Create a simple Python script to send the email
+    cat > send_report_email.py << 'PYTHON_SCRIPT'
+#!/usr/bin/env python3
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
+import os
+import sys
+
+def send_report_email():
+    try:
+        from scripts.email_config import RECIPIENTS, EMAIL_SERVER_CONFIG
+        
+        # Get report file from command line argument
+        if len(sys.argv) < 2:
+            print("❌ No report file specified")
+            return False
+            
+        report_file = sys.argv[1]
+        if not os.path.exists(report_file):
+            print(f"❌ Report file not found: {report_file}")
+            return False
+        
+        # Read report content
+        with open(report_file, 'r') as f:
+            report_content = f.read()
+        
+        print(f"📄 Report content length: {len(report_content)} characters")
+        
+        # Send to all enabled recipients
+        enabled_recipients = [r for r in RECIPIENTS if r['enabled']]
+        
+        if not enabled_recipients:
+            print("❌ No enabled recipients found")
+            return False
+        
+        print(f"📧 Sending to {len(enabled_recipients)} recipients...")
+        
+        for recipient in enabled_recipients:
+            try:
+                msg = MIMEMultipart('alternative')
+                msg['From'] = f"{EMAIL_SERVER_CONFIG['sender_name']} <{EMAIL_SERVER_CONFIG['sender_email']}>"
+                msg['To'] = recipient['email']
+                msg['Subject'] = f"📊 Weee! Price Tracker - Daily Report ({datetime.now().strftime('%Y-%m-%d')})"
+                
+                # Create HTML version
+                html_content = f"""
+<html>
+<body style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
+    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px;">
+        <h2 style="color: #28a745;">🚀 Weee! Price Tracker - Daily Report</h2>
+        <p><strong>Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p><strong>Recipient:</strong> {recipient['name']}</p>
+        
+        <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <pre style="font-family: monospace; white-space: pre-wrap;">{report_content}</pre>
+        </div>
+        
+        <p style="color: #666; font-size: 12px;">
+            This is an automated report from your Weee! Price Tracker system.
+        </p>
+    </div>
+</body>
+</html>
+                """
+                
+                msg.attach(MIMEText(report_content, 'plain'))
+                msg.attach(MIMEText(html_content, 'html'))
+                
+                # Send email
+                server = smtplib.SMTP(EMAIL_SERVER_CONFIG['smtp_server'], EMAIL_SERVER_CONFIG['smtp_port'])
+                server.starttls()
+                server.login(EMAIL_SERVER_CONFIG['sender_email'], EMAIL_SERVER_CONFIG['sender_password'])
+                server.sendmail(EMAIL_SERVER_CONFIG['sender_email'], recipient['email'], msg.as_string())
+                server.quit()
+                
+                print(f"✅ Report sent to {recipient['name']} ({recipient['email']})")
+                
+            except Exception as e:
+                print(f"❌ Failed to send to {recipient['name']}: {e}")
+                return False
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Email send failed: {e}")
+        return False
+
+if __name__ == "__main__":
+    success = send_report_email()
+    sys.exit(0 if success else 1)
+PYTHON_SCRIPT
+
+    # Run the email script with the report file
+    python3 send_report_email.py "$LATEST_REPORT"
+    EMAIL_EXIT_CODE=$?
+    
+    # Clean up
+    rm -f send_report_email.py
+    
+    if [ $EMAIL_EXIT_CODE -eq 0 ]; then
+        print_status "Email report sent successfully"
+    else
+        print_error "Failed to send email report"
+        return 1
+    fi
+}
+
+# Function to create reports directory
+setup_reports() {
+    mkdir -p reports
+    print_status "Reports directory created"
+}
+
+# Main execution
+main() {
+    print_status "🚀 Starting Weee! Price Tracker Complete System"
+    print_status "================================================"
+    
+    # Setup
+    check_venv
+    check_dependencies
+    setup_directories
+    setup_reports
+    
+    # Run components
+    if run_scraper; then
+        run_analysis
+        generate_email_report
+        
+        # Ask user if they want to send email
+        echo
+        read -p "📧 Do you want to send the report via email? (y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            send_email_report
+        else
+            print_info "Email sending skipped"
+        fi
+    else
+        print_error "Scraper failed. Stopping execution."
+        exit 1
+    fi
+    
+    print_status "✅ Complete system run finished successfully!"
+    print_status "📁 Check the 'reports' directory for generated reports"
+    print_status "📁 Check the 'logs' directory for execution logs"
+}
+
+# Run main function
+main "$@" 
