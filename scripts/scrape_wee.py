@@ -14,14 +14,41 @@ import re
 import json
 from difflib import SequenceMatcher
 
+# Try to import email configuration
+try:
+    from config.email_config import (
+        RECIPIENTS, EMAIL_SERVER_CONFIG, GLOBAL_ALERT_SETTINGS, 
+        EMAIL_TEMPLATES, can_send_alert, record_alert_sent
+    )
+    EMAIL_ENABLED = GLOBAL_ALERT_SETTINGS.get('enable_alerts', False)
+except ImportError:
+    RECIPIENTS = []
+    EMAIL_SERVER_CONFIG = {}
+    GLOBAL_ALERT_SETTINGS = {}
+    EMAIL_TEMPLATES = {}
+    EMAIL_ENABLED = False
+    print("⚠️ Email configuration not found. Run 'python scripts/manage_emails.py' to set up.")
+
+# Load environment variables
+import os
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # 📌 Products to track for price drops
-TRACKED_PRODUCTS = [
-    "Maggi Masala Instant Noodles 9.8 oz",
-    "Lee Kum Kee Supreme Soy Sauce 500 ml"
-]
+tracked_products_str = os.getenv('TRACKED_PRODUCTS', '["Maggi Masala Instant Noodles 9.8 oz", "Lee Kum Kee Supreme Soy Sauce 500 ml"]')
+try:
+    TRACKED_PRODUCTS = json.loads(tracked_products_str)
+except json.JSONDecodeError:
+    TRACKED_PRODUCTS = ["Maggi Masala Instant Noodles 9.8 oz", "Lee Kum Kee Supreme Soy Sauce 500 ml"]
+
+# Debug: Print what products we're tracking (only in debug mode)
+if os.getenv('DEBUG_MODE', 'false').lower() == 'true':
+    print(f"🔍 Debug: TRACKED_PRODUCTS = {TRACKED_PRODUCTS}")
 
 # 📌 Updated URL to a valid product category page
-BASE_URL = "https://www.sayweee.com/en/category/sale"  # Deals/Sale page
+BASE_URL = os.getenv('BASE_URL', "https://www.sayweee.com/en/category/sale")  # Deals/Sale page
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -42,9 +69,33 @@ def is_tracked_product(product_name):
         return False
     
     for tracked in TRACKED_PRODUCTS:
-        # Exact match or high similarity (>0.8)
-        if tracked.lower() == product_name.lower() or similar(tracked, product_name) > 0.8:
+        # Exact match or high similarity (>0.6 for more flexible matching)
+        if tracked.lower() == product_name.lower() or similar(tracked, product_name) > 0.6:
             return True
+        
+        # Check if key words match
+        tracked_words = set(tracked.lower().split())
+        product_words = set(product_name.lower().split())
+        
+        # If more than 40% of words match, consider it a match
+        common_words = tracked_words.intersection(product_words)
+        if len(common_words) >= len(tracked_words) * 0.4:
+            return True
+        
+        # Check for specific brand/product keywords
+        if 'maggi' in tracked.lower() and 'maggi' in product_name.lower():
+            return True
+        if 'lee kum' in tracked.lower() and 'lee kum' in product_name.lower():
+            return True
+        if 'soy sauce' in tracked.lower() and 'soy' in product_name.lower():
+            return True
+        if 'noodles' in tracked.lower() and 'noodles' in product_name.lower():
+            return True
+        if 'barramundi' in tracked.lower() and 'barramundi' in product_name.lower():
+            return True
+        if 'tsf' in tracked.lower() and 'tsf' in product_name.lower():
+            return True
+    
     return False
 
 def extract_price_value(price_str):
@@ -78,60 +129,126 @@ def save_price_history(history, filename="data/processed/price_history.json"):
         json.dump(history, f, indent=2)
 
 def send_price_alert(product_name, old_price, new_price, email_config=None):
-    """Send email alert for price drop"""
+    """Send email alert for price drop to multiple recipients"""
     try:
-        if not email_config:
-            # Print alert if no email config
-            print(f"🚨 PRICE DROP ALERT!")
-            print(f"Product: {product_name}")
-            print(f"Old Price: ${old_price:.2f}")
-            print(f"New Price: ${new_price:.2f}")
-            print(f"Savings: ${old_price - new_price:.2f} ({((old_price - new_price) / old_price * 100):.1f}% off)")
-            print("-" * 50)
-            return True
+        # Calculate savings
+        savings_amount = old_price - new_price
+        savings_percentage = (savings_amount / old_price) * 100
+        
+        # Always print console alert
+        print(f"🚨 PRICE DROP ALERT!")
+        print(f"Product: {product_name}")
+        print(f"Old Price: ${old_price:.2f}")
+        print(f"New Price: ${new_price:.2f}")
+        print(f"Savings: ${savings_amount:.2f} ({savings_percentage:.1f}% off)")
+        print("-" * 50)
+        
+        # Send emails to enabled recipients
+        if EMAIL_ENABLED and RECIPIENTS:
+            enabled_recipients = [r for r in RECIPIENTS if r['enabled']]
             
-        # Email configuration (if provided)
-        smtp_server = email_config.get('smtp_server', 'smtp.gmail.com')
-        smtp_port = email_config.get('smtp_port', 587)
-        sender_email = email_config['sakshukhade@gmail.com']
-        sender_password = email_config['Sak@Gmail']
-        recipient_email = email_config['skhade5@asu.edu']
+            if not enabled_recipients:
+                print("📧 No enabled recipients found")
+                return True
+            
+            emails_sent = 0
+            
+            for recipient in enabled_recipients:
+                # Check recipient preferences
+                prefs = recipient['alert_preferences']
+                if (savings_amount < prefs['minimum_savings'] or 
+                    savings_percentage < prefs['minimum_percentage']):
+                    continue
+                
+                # Check if we can send alert (prevent spam)
+                if not can_send_alert(product_name, recipient['email']):
+                    print(f"⏰ Skipping alert to {recipient['name']} (cooldown/limit)")
+                    continue
+                
+                try:
+                    # Send email to this recipient
+                    success = send_single_email(
+                        product_name, old_price, new_price, 
+                        savings_amount, savings_percentage, recipient
+                    )
+                    
+                    if success:
+                        record_alert_sent(product_name, recipient['email'])
+                        emails_sent += 1
+                        
+                except Exception as e:
+                    print(f"❌ Failed to send email to {recipient['name']}: {e}")
+            
+            if emails_sent > 0:
+                print(f"📧 Sent {emails_sent} email alert(s)")
+            else:
+                print("📧 No email alerts sent (preferences/limits)")
+        else:
+            print("📧 Email alerts disabled or no recipients configured")
         
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = recipient_email
-        msg['Subject'] = f"🚨 Price Drop Alert: {product_name}"
-        
-        body = f"""
-        Great news! The price for one of your tracked products has dropped!
-        
-        Product: {product_name}
-        Old Price: ${old_price:.2f}
-        New Price: ${new_price:.2f}
-        You Save: ${old_price - new_price:.2f} ({((old_price - new_price) / old_price * 100):.1f}% off)
-        
-        Check it out at: {BASE_URL}
-        
-        Happy shopping!
-        """
-        
-        msg.attach(MIMEText(body, 'plain'))
-        
-        # Send email
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-        server.login(sender_email, sender_password)
-        text = msg.as_string()
-        server.sendmail(sender_email, recipient_email, text)
-        server.quit()
-        
-        print(f"✅ Price drop alert sent for {product_name}")
         return True
         
     except Exception as e:
         print(f"❌ Failed to send alert: {e}")
         return False
+
+def send_single_email(product_name, old_price, new_price, savings_amount, savings_percentage, recipient):
+    """Send email to a single recipient"""
+    
+    # Email configuration
+    smtp_server = EMAIL_SERVER_CONFIG['smtp_server']
+    smtp_port = EMAIL_SERVER_CONFIG['smtp_port']
+    sender_email = EMAIL_SERVER_CONFIG['sender_email']
+    sender_password = EMAIL_SERVER_CONFIG['sender_password']
+    sender_name = EMAIL_SERVER_CONFIG['sender_name']
+    
+    # Create message
+    msg = MIMEMultipart('alternative')
+    msg['From'] = f"{sender_name} <{sender_email}>"
+    msg['To'] = recipient['email']
+    
+    # Subject line
+    subject_prefix = GLOBAL_ALERT_SETTINGS.get('email_subject_prefix', '🚨 Weee! Price Drop Alert: ')
+    msg['Subject'] = f"{subject_prefix}{product_name}"
+    
+    # Email body
+    product_url = BASE_URL if GLOBAL_ALERT_SETTINGS.get('include_product_link', True) else ""
+    
+    # Plain text version
+    text_body = EMAIL_TEMPLATES['plain_text'].format(
+        recipient_name=recipient['name'],
+        product_name=product_name,
+        old_price=old_price,
+        new_price=new_price,
+        savings_amount=savings_amount,
+        savings_percentage=savings_percentage,
+        product_url=product_url
+    )
+    
+    # HTML version
+    html_body = EMAIL_TEMPLATES['html'].format(
+        recipient_name=recipient['name'],
+        product_name=product_name,
+        old_price=old_price,
+        new_price=new_price,
+        savings_amount=savings_amount,
+        savings_percentage=savings_percentage,
+        product_url=product_url
+    )
+    
+    msg.attach(MIMEText(text_body, 'plain'))
+    msg.attach(MIMEText(html_body, 'html'))
+    
+    # Send email
+    server = smtplib.SMTP(smtp_server, smtp_port)
+    server.starttls()
+    server.login(sender_email, sender_password)
+    text = msg.as_string()
+    server.sendmail(sender_email, recipient['email'], text)
+    server.quit()
+    
+    print(f"✅ Email sent to {recipient['name']} ({recipient['email']})")
+    return True
 
 def check_price_drops(products):
     """Check for price drops and send alerts"""
@@ -203,7 +320,10 @@ def parse_product_data(html):
         '[class*="product"]',
         '[class*="Product"]',
         'div[class*="card"]',
-        'a[href*="/product/"]'  # Links to product pages
+        'a[href*="/product/"]',  # Links to product pages
+        'div[class*="item"]',  # Generic item containers
+        'div[class*="product-item"]',  # Product items
+        'div[class*="product-card"]'  # Product cards
     ]
     
     for selector in selectors_to_try:
@@ -211,16 +331,24 @@ def parse_product_data(html):
         print(f"Selector '{selector}': found {len(items)} items")
         
         if items:
-            for i, item in enumerate(items[:20]):  # Increased to 20 for more variety
+            for i, item in enumerate(items[:30]):  # Increased to 30 for more variety
                 try:
                     # Try different ways to extract product name
                     name_selectors = [
                         'div[data-role="product-name"]',
                         '[data-testid*="name"]',
-                        'h1', 'h2', 'h3', 'h4',
+                        '[data-testid*="title"]',
+                        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
                         '.product-name',
                         '.title',
-                        'a[href*="/product/"]'
+                        '.name',
+                        'a[href*="/product/"]',
+                        'span[class*="name"]',
+                        'span[class*="title"]',
+                        'div[class*="name"]',
+                        'div[class*="title"]',
+                        'p[class*="name"]',
+                        'p[class*="title"]'
                     ]
                     
                     name = None
@@ -228,10 +356,39 @@ def parse_product_data(html):
                         name_elem = item.select_one(name_sel)
                         if name_elem:
                             name = name_elem.get_text(strip=True)
-                            break
+                            if name and len(name) > 3:  # Ensure it's a meaningful name
+                                break
                     
-                    # 🎯 Only process tracked products
-                    if not name or not is_tracked_product(name):
+                    # If no name found, try to get text from the entire item
+                    if not name:
+                        # Get all text from the item and look for product-like text
+                        all_text = item.get_text(strip=True)
+                        lines = all_text.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if len(line) > 10 and any(keyword in line.lower() for keyword in ['noodles', 'sauce', 'soy', 'maggi', 'lee kum', 'barramundi', 'fish']):
+                                name = line
+                                break
+                    
+                    # 🎯 Only process tracked products (but be more flexible)
+                    if not name:
+                        continue
+                    
+                    # Check if this product matches any tracked product
+                    is_tracked = is_tracked_product(name)
+                    
+                    # Debug: Show product matching (only in debug mode)
+                    if os.getenv('DEBUG_MODE', 'false').lower() == 'true' and name and len(name) > 5:
+                        if is_tracked:
+                            print(f"✅ Matched: '{name}'")
+                        else:
+                            print(f"❌ Not matched: '{name}'")
+                    
+                    # Debug: Print all products found (only in debug mode)
+                    if os.getenv('DEBUG_MODE', 'false').lower() == 'true' and name and len(name) > 5:
+                        print(f"🔍 Found product: '{name}' - Tracked: {is_tracked}")
+                    
+                    if not is_tracked:
                         continue
                     
                     # Try different ways to extract price
@@ -240,7 +397,10 @@ def parse_product_data(html):
                         '[data-testid*="price"]',
                         '.price',
                         '[class*="price"]',
-                        '[class*="Price"]'
+                        '[class*="Price"]',
+                        'span[class*="price"]',
+                        'div[class*="price"]',
+                        'p[class*="price"]'
                     ]
                     
                     price = None
@@ -248,7 +408,15 @@ def parse_product_data(html):
                         price_elem = item.select_one(price_sel)
                         if price_elem:
                             price = price_elem.get_text(strip=True)
-                            break
+                            if price and ('$' in price or '€' in price or '£' in price):
+                                break
+                    
+                    # If no price found, look for price patterns in all text
+                    if not price:
+                        all_text = item.get_text(strip=True)
+                        price_match = re.search(r'\$[\d,]+\.?\d*', all_text)
+                        if price_match:
+                            price = price_match.group()
                     
                     # Try to extract unit price
                     unit_price_selectors = [
