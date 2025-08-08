@@ -156,21 +156,28 @@ class FirebaseManager:
             from datetime import timedelta
             
             price_history_ref = self.db.collection('priceHistory')
-            cutoff_date = datetime.now() - timedelta(days=days)
-            
-            query = price_history_ref.where('productId', '==', product_id).where('scrapedAt', '>=', cutoff_date).order_by('scrapedAt')
+            # Simplified query to avoid index requirements
+            query = price_history_ref.where('productId', '==', product_id)
             docs = query.stream()
             
             trends = []
+            cutoff_date = datetime.now() - timedelta(days=days)
+            
             for doc in docs:
                 data = doc.to_dict()
-                trends.append({
-                    'price': data.get('price'),
-                    'price_str': data.get('priceStr'),
-                    'scraped_at': data.get('scrapedAt')
-                })
+                scraped_at = data.get('scrapedAt')
+                
+                # Filter by date in Python instead of Firestore
+                if scraped_at and scraped_at >= cutoff_date:
+                    trends.append({
+                        'price': data.get('price'),
+                        'price_str': data.get('priceStr'),
+                        'scraped_at': scraped_at
+                    })
             
-            return trends
+            # Sort in Python instead of Firestore
+            trends.sort(key=lambda x: x.get('scraped_at', datetime.min), reverse=True)
+            return trends[:days]
             
         except Exception as e:
             self.logger.error(f"Error getting price trends: {e}")
@@ -182,28 +189,34 @@ class FirebaseManager:
             from datetime import timedelta
             
             alerts_ref = self.db.collection('alerts')
-            cutoff_date = datetime.now() - timedelta(days=days)
-            
-            query = alerts_ref.where('alertSentAt', '>=', cutoff_date).order_by('savingsPercentage', direction=firestore.Query.DESCENDING).limit(10)
-            docs = query.stream()
+            # Simplified query to avoid index requirements
+            docs = alerts_ref.stream()
             
             savings = []
+            cutoff_date = datetime.now() - timedelta(days=days)
+            
             for doc in docs:
                 data = doc.to_dict()
-                # Get product name
-                product_doc = self.db.collection('products').document(data['productId']).get()
-                product_name = product_doc.to_dict()['productName'] if product_doc.exists else 'Unknown'
+                alert_sent_at = data.get('alertSentAt')
                 
-                savings.append({
-                    'product_name': product_name,
-                    'old_price': data.get('oldPrice'),
-                    'new_price': data.get('newPrice'),
-                    'savings_amount': data.get('savingsAmount'),
-                    'savings_percentage': data.get('savingsPercentage'),
-                    'alert_sent_at': data.get('alertSentAt')
-                })
+                # Filter by date in Python instead of Firestore
+                if alert_sent_at and alert_sent_at >= cutoff_date:
+                    # Get product name
+                    product_doc = self.db.collection('products').document(data['productId']).get()
+                    product_name = product_doc.to_dict()['productName'] if product_doc.exists else 'Unknown'
+                    
+                    savings.append({
+                        'product_name': product_name,
+                        'old_price': data.get('oldPrice'),
+                        'new_price': data.get('newPrice'),
+                        'savings_amount': data.get('savingsAmount'),
+                        'savings_percentage': data.get('savingsPercentage'),
+                        'alert_sent_at': alert_sent_at
+                    })
             
-            return savings
+            # Sort in Python instead of Firestore
+            savings.sort(key=lambda x: x.get('savings_percentage', 0), reverse=True)
+            return savings[:10]
             
         except Exception as e:
             self.logger.error(f"Error getting biggest savings: {e}")
