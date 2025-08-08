@@ -33,6 +33,10 @@ soupsieve==2.7
 six==1.17.0
 typing_extensions==4.14.1
 
+# Firebase integration
+firebase-admin>=6.4.0
+google-cloud-firestore>=2.14.0
+
 # Development and testing (optional)
 pytest==8.0.0
 pytest-cov==4.1.0

@@ -14,6 +14,15 @@ import re
 import json
 from difflib import SequenceMatcher
 
+# Try to import Firebase manager
+try:
+    from firebase_manager import FirebaseManager
+    FIREBASE_ENABLED = True
+    print("✅ Firebase integration enabled")
+except ImportError:
+    FIREBASE_ENABLED = False
+    print("⚠️ Firebase not available, falling back to CSV storage")
+
 # Try to import email configuration
 try:
     # Try to import from scripts directory first
@@ -290,6 +299,59 @@ def save_price_history(history, filename="data/processed/price_history.json"):
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'w') as f:
         json.dump(history, f, indent=2)
+
+def get_latest_price_firebase(product_name):
+    """Get latest price from Firebase"""
+    if FIREBASE_ENABLED:
+        try:
+            firebase = FirebaseManager()
+            # Get product ID first
+            products = firebase.get_tracked_products()
+            for product in products:
+                if product['name'] == product_name:
+                    return firebase.get_latest_price(product['id'])
+            return None
+        except Exception as e:
+            print(f"⚠️ Error getting price from Firebase: {e}")
+            return None
+    return None
+
+def save_price_to_firebase(product_name, price_data):
+    """Save price data to Firebase"""
+    if FIREBASE_ENABLED:
+        try:
+            firebase = FirebaseManager()
+            # Save or get product
+            product_id = firebase.save_product({
+                'name': product_name,
+                'brand': price_data.get('brand'),
+                'category': price_data.get('category'),
+                'unit_size': price_data.get('unit')
+            })
+            
+            if product_id:
+                # Save price record
+                firebase.save_price_record(product_id, {
+                    'price': price_data.get('price'),
+                    'price_str': price_data.get('price_str'),
+                    'unit_price': price_data.get('unit_price'),
+                    'unit_price_str': price_data.get('unit_price_str'),
+                    'source_url': price_data.get('source_url'),
+                    'source_selector': price_data.get('source_selector')
+                })
+                
+                # Check for price drops
+                current_price = price_data.get('price')
+                if current_price:
+                    alert = firebase.check_price_drop(product_id, current_price)
+                    if alert:
+                        print(f"💰 Price drop detected: {product_name} - ${alert['old_price']} → ${alert['new_price']} (Save ${alert['savings']:.2f})")
+                
+                return True
+        except Exception as e:
+            print(f"⚠️ Error saving to Firebase: {e}")
+            return False
+    return False
 
 def send_price_alert(product_name, old_price, new_price, email_config=None):
     """Send email alert for price drop to multiple recipients"""
@@ -655,8 +717,34 @@ if __name__ == "__main__":
 
         if product_data:
             print(f"✅ Found {len(product_data)} tracked products")
+            
+            # Save to both CSV (fallback) and Firebase
             save_to_csv(product_data)
-            check_price_drops(product_data)
+            
+            # Save to Firebase if enabled
+            if FIREBASE_ENABLED:
+                print("🔥 Saving to Firebase...")
+                firebase_saved = 0
+                for product in product_data:
+                    price_data = {
+                        'price': extract_price_value(product['Price']),
+                        'price_str': product['Price'],
+                        'unit_price': None,
+                        'unit_price_str': product.get('Unit', ''),
+                        'source_url': BASE_URL,
+                        'source_selector': product.get('Source', ''),
+                        'brand': product.get('Brand', ''),
+                        'category': product.get('Category', ''),
+                        'unit': product.get('Unit', '')
+                    }
+                    
+                    if save_price_to_firebase(product['Product Name'], price_data):
+                        firebase_saved += 1
+                
+                print(f"🔥 Saved {firebase_saved} products to Firebase")
+            else:
+                # Fallback to CSV-only price checking
+                check_price_drops(product_data)
         else:
             print("⚠️ No tracked products found on this page.")
             print("💡 The products might be out of stock or on different pages.")
